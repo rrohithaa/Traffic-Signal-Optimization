@@ -1,0 +1,500 @@
+# =============================================================================
+# simulation.py – Pygame-based 4-way intersection simulation
+# =============================================================================
+# Responsibilities:
+#   • Draw the road, lane markings, signals, vehicles, and HUD panel
+#   • Spawn, move, and despawn vehicles according to signal state
+#   • Expose density and cleared-vehicle counts to the controller
+# =============================================================================
+
+import pygame
+import random
+from dataclasses import dataclass, field
+from typing import List, Dict
+
+from config import (
+    WINDOW_WIDTH, WINDOW_HEIGHT, FPS, ROAD_WIDTH, LANE_WIDTH,
+    CENTER_X, CENTER_Y,
+    COLOR_BG, COLOR_ROAD, COLOR_LANE_MARK, COLOR_SIDEWALK,
+    COLOR_WHITE, COLOR_BLACK, COLOR_PANEL_BG, COLOR_ACCENT,
+    COLOR_VEHICLE,
+    VEHICLE_SPEED, VEHICLE_LENGTH, VEHICLE_WIDTH,
+    MAX_VEHICLES_PER_LANE, SPAWN_INTERVAL, DIRECTIONS
+)
+from traffic_controller import TrafficController
+
+
+# ── Vehicle data class ────────────────────────────────────────────────────────
+
+@dataclass
+class Vehicle:
+    direction: str      # "North" | "South" | "East" | "West"
+    x: float
+    y: float
+    stopped: bool = False
+    cleared: bool = False
+    wait_frames: int = 0
+    color: tuple = field(default_factory=lambda: (100, 160, 255))
+
+
+# ── Intersection geometry helpers ─────────────────────────────────────────────
+
+# Stop-line positions (pixel coordinate where the front of the vehicle halts)
+# North: car travels DOWN (y increases) → must stop ABOVE the intersection box
+# South: car travels UP   (y decreases) → must stop BELOW the intersection box
+# East:  car travels LEFT (x decreases) → must stop to the RIGHT of the box
+# West:  car travels RIGHT(x increases) → must stop to the LEFT of the box
+STOP_LINE = {
+    "North": CENTER_Y - ROAD_WIDTH // 2 - 4,   # above centre box
+    "South": CENTER_Y + ROAD_WIDTH // 2 + 4,   # below centre box
+    "East":  CENTER_X + ROAD_WIDTH // 2 + 4,   # right of centre box
+    "West":  CENTER_X - ROAD_WIDTH // 2 - 4,   # left of centre box
+}
+
+# Spawn positions (off-screen edge)
+SPAWN_POS = {
+    "North": (CENTER_X - LANE_WIDTH // 2, -VEHICLE_LENGTH),
+    "South": (CENTER_X + LANE_WIDTH // 2, WINDOW_HEIGHT + VEHICLE_LENGTH),
+    "East":  (WINDOW_WIDTH + VEHICLE_LENGTH, CENTER_Y - LANE_WIDTH // 2),
+    "West":  (-VEHICLE_LENGTH, CENTER_Y + LANE_WIDTH // 2),
+}
+
+# Movement deltas per direction
+DELTA = {
+    "North": (0,  VEHICLE_SPEED),
+    "South": (0, -VEHICLE_SPEED),
+    "East":  (-VEHICLE_SPEED, 0),
+    "West":  ( VEHICLE_SPEED, 0),
+}
+
+# Clear boundary (vehicle has exited the frame)
+def _is_off_screen(v: Vehicle) -> bool:
+    margin = VEHICLE_LENGTH * 2
+    return (v.x < -margin or v.x > WINDOW_WIDTH  + margin or
+            v.y < -margin or v.y > WINDOW_HEIGHT + margin)
+
+
+class Simulation:
+    """
+    Manages all visual and vehicle-simulation logic.
+
+    Parameters
+    ----------
+    controller : TrafficController
+    """
+
+    def __init__(self, controller: TrafficController):
+        pygame.init()
+        self.screen  = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+        pygame.display.set_caption("AI Traffic Signal Optimization")
+        self.clock   = pygame.time.Clock()
+        self.font_sm = pygame.font.SysFont("consolas", 14)
+        self.font_md = pygame.font.SysFont("consolas", 18, bold=True)
+        self.font_lg = pygame.font.SysFont("consolas", 22, bold=True)
+
+        self.controller = controller
+        self.vehicles: List[Vehicle] = []
+        self.densities: Dict[str, int] = {d: 0 for d in DIRECTIONS}
+
+        # Metrics
+        self._spawn_timers     = {d: 0   for d in DIRECTIONS}
+        self._cleared_this_dt  = {d: 0   for d in DIRECTIONS}
+        self._total_cleared    = {d: 0   for d in DIRECTIONS}
+        self._avg_wait         = {d: 0.0 for d in DIRECTIONS}
+        self._wait_samples     = {d: []  for d in DIRECTIONS}
+        self._frame_count      = 0
+
+    # ------------------------------------------------------------------
+    # Main loop helpers
+    # ------------------------------------------------------------------
+
+    def handle_events(self) -> bool:
+        """Process pygame events.  Returns False when user quits."""
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                return False
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                return False
+        return True
+
+    def update(self, densities: dict) -> dict:
+        """
+        Advance simulation by one frame.
+
+        Parameters
+        ----------
+        densities : {direction: int}  vehicle counts from detector/generator
+
+        Returns
+        -------
+        dict  {direction: int}  vehicles cleared this frame (for reward calc)
+        """
+        self.densities = densities
+        self._frame_count += 1
+        self._cleared_this_dt = {d: 0 for d in DIRECTIONS}
+
+        self._spawn_vehicles(densities)
+        self._move_vehicles()
+        self._update_wait_metrics()
+
+        return dict(self._cleared_this_dt)
+
+    def draw(self, video_mode: bool = False):
+        """Render everything to the screen."""
+        self.screen.fill(COLOR_BG)
+        self._draw_road()
+        self._draw_signals()
+        self._draw_vehicles()
+        self._draw_hud(video_mode)
+        pygame.display.flip()
+
+    def tick(self) -> float:
+        """Advance clock and return elapsed seconds."""
+        ms = self.clock.tick(FPS)
+        return ms / 1000.0
+
+    def quit(self):
+        pygame.quit()
+
+    # ------------------------------------------------------------------
+    # Vehicle logic
+    # ------------------------------------------------------------------
+
+    def _spawn_vehicles(self, densities: dict):
+        """
+        Spawn vehicles at road entrances according to density levels.
+        Higher density → shorter spawn interval.
+        """
+        for d in DIRECTIONS:
+            self._spawn_timers[d] += 1
+            lane_count  = sum(1 for v in self.vehicles if v.direction == d)
+            density     = densities.get(d, 0)
+
+            # Derive effective spawn interval: dense traffic → spawn faster
+            effective_interval = max(20, SPAWN_INTERVAL - density * 3)
+
+            if (self._spawn_timers[d] >= effective_interval and
+                    lane_count < MAX_VEHICLES_PER_LANE):
+                self._spawn_timers[d] = 0
+                sx, sy = SPAWN_POS[d]
+                color  = COLOR_VEHICLE["NS"] if d in ("North", "South") else COLOR_VEHICLE["EW"]
+                self.vehicles.append(Vehicle(direction=d, x=float(sx),
+                                              y=float(sy), color=color))
+
+    def _move_vehicles(self):
+        """Advance or stop each vehicle based on signal and lead car."""
+        active = [v for v in self.vehicles if not v.cleared]
+
+        for v in active:
+            signal_green = self.controller.is_green(v.direction)
+            past_stop    = self._past_stop_line(v)   # committed to crossing
+            at_stop      = self._at_stop_line(v)     # at or past stop line
+            blocked      = self._is_blocked(v, active)
+
+            # Decision logic:
+            #   1. Past the stop line → NEVER stop; always drive through.
+            #   2. Blocked by leading car → stop (queue following).
+            #   3. At/beyond stop line on red → hold position.
+            #   4. Green and not blocked → move.
+            if past_stop:
+                v.stopped = False
+            elif blocked:
+                v.stopped = True
+            elif at_stop and not signal_green:
+                v.stopped = True
+            else:
+                v.stopped = False
+
+            if not v.stopped:
+                dx, dy = DELTA[v.direction]
+                v.x += dx
+                v.y += dy
+                # Snap precisely to stop line so car doesn't creep past it
+                self._snap_to_stop_line(v, signal_green)
+            else:
+                v.wait_frames += 1
+
+            # Mark cleared when off-screen
+            if _is_off_screen(v):
+                v.cleared = True
+                self._cleared_this_dt[v.direction] += 1
+                self._total_cleared[v.direction]   += 1
+                self._wait_samples[v.direction].append(v.wait_frames)
+
+        # Remove cleared vehicles to keep list short
+        self.vehicles = [v for v in self.vehicles if not v.cleared]
+
+    def _at_stop_line(self, v: Vehicle) -> bool:
+        """True when the vehicle front edge has reached (not yet crossed into) the stop zone."""
+        sl   = STOP_LINE[v.direction]
+        half = VEHICLE_LENGTH // 2
+        if v.direction == "North":
+            return v.y + half >= sl
+        if v.direction == "South":
+            return v.y - half <= sl
+        if v.direction == "East":
+            return v.x - half <= sl
+        if v.direction == "West":
+            return v.x + half >= sl
+        return False
+
+    def _past_stop_line(self, v: Vehicle) -> bool:
+        """True when the vehicle CENTER has crossed into the intersection box.
+
+        A car past the stop line is committed to crossing -- stopping it
+        mid-intersection would block cross-traffic, so always let it continue.
+        """
+        sl = STOP_LINE[v.direction]
+        if v.direction == "North":
+            return v.y > sl       # center is past (below) the stop line
+        if v.direction == "South":
+            return v.y < sl       # center is past (above) the stop line
+        if v.direction == "East":
+            return v.x < sl       # center is past (left of) the stop line
+        if v.direction == "West":
+            return v.x > sl       # center is past (right of) the stop line
+        return False
+
+    def _snap_to_stop_line(self, v: Vehicle, signal_green: bool):
+        """Clamp a moving vehicle exactly at the stop line on red.
+
+        Prevents sub-pixel overshoot: VEHICLE_SPEED may not divide evenly into
+        the remaining distance, causing the car to creep 2-3 px past the line.
+        Only applied when the signal is not green.
+        """
+        if signal_green:
+            return
+        sl   = STOP_LINE[v.direction]
+        half = VEHICLE_LENGTH // 2
+        if v.direction == "North" and v.y + half > sl:
+            v.y = sl - half
+        elif v.direction == "South" and v.y - half < sl:
+            v.y = sl + half
+        elif v.direction == "East" and v.x - half < sl:
+            v.x = sl + half
+        elif v.direction == "West" and v.x + half > sl:
+            v.x = sl - half
+
+    def _is_blocked(self, v: Vehicle, others: list) -> bool:
+        """Return True if another vehicle is directly ahead."""
+        gap = VEHICLE_LENGTH + 6
+        for other in others:
+            if other is v or other.direction != v.direction:
+                continue
+            if v.direction == "North"  and other.y > v.y and other.y - v.y < gap:
+                return True
+            if v.direction == "South"  and other.y < v.y and v.y - other.y < gap:
+                return True
+            if v.direction == "East"   and other.x < v.x and v.x - other.x < gap:
+                return True
+            if v.direction == "West"   and other.x > v.x and other.x - v.x < gap:
+                return True
+        return False
+
+    def _update_wait_metrics(self):
+        """Keep rolling average wait time per direction."""
+        for d in DIRECTIONS:
+            samples = self._wait_samples[d]
+            if samples:
+                self._avg_wait[d] = sum(samples) / len(samples) / FPS  # → seconds
+                if len(samples) > 200:
+                    self._wait_samples[d] = samples[-100:]
+
+    # ------------------------------------------------------------------
+    # Drawing helpers
+    # ------------------------------------------------------------------
+
+    def _draw_road(self):
+        w, h   = WINDOW_WIDTH, WINDOW_HEIGHT
+        cx, cy = CENTER_X, CENTER_Y
+        rw     = ROAD_WIDTH
+
+        # Sidewalk fills
+        pygame.draw.rect(self.screen, COLOR_SIDEWALK, (0, 0, w, h))
+
+        # Horizontal road (East-West)
+        pygame.draw.rect(self.screen, COLOR_ROAD, (0, cy - rw // 2, w, rw))
+        # Vertical road (North-South)
+        pygame.draw.rect(self.screen, COLOR_ROAD, (cx - rw // 2, 0, rw, h))
+
+        # Centre box
+        pygame.draw.rect(self.screen, COLOR_ROAD,
+                         (cx - rw // 2, cy - rw // 2, rw, rw))
+
+        # Dashed centre lines
+        dash, gap = 18, 10
+        # Horizontal
+        x = 0
+        while x < w:
+            if not (cx - rw // 2 - gap < x < cx + rw // 2 + gap):
+                pygame.draw.rect(self.screen, COLOR_LANE_MARK, (x, cy - 1, dash, 2))
+            x += dash + gap
+        # Vertical
+        y = 0
+        while y < h:
+            if not (cy - rw // 2 - gap < y < cy + rw // 2 + gap):
+                pygame.draw.rect(self.screen, COLOR_LANE_MARK, (cx - 1, y, 2, dash))
+            y += dash + gap
+
+        # Stop lines (drawn on the correct approach side of the box)
+        lw = 3
+        # North arm: horizontal line across the left lane (cars coming down)
+        pygame.draw.line(self.screen, COLOR_WHITE,
+                         (cx - rw // 2, STOP_LINE["North"]),
+                         (cx,           STOP_LINE["North"]), lw)
+        # South arm: horizontal line across the right lane (cars coming up)
+        pygame.draw.line(self.screen, COLOR_WHITE,
+                         (cx,           STOP_LINE["South"]),
+                         (cx + rw // 2, STOP_LINE["South"]), lw)
+        # East arm: vertical line across the upper lane (cars coming left)
+        pygame.draw.line(self.screen, COLOR_WHITE,
+                         (STOP_LINE["East"], cy - rw // 2),
+                         (STOP_LINE["East"], cy),            lw)
+        # West arm: vertical line across the lower lane (cars coming right)
+        pygame.draw.line(self.screen, COLOR_WHITE,
+                         (STOP_LINE["West"], cy),
+                         (STOP_LINE["West"], cy + rw // 2),  lw)
+
+    def _draw_signals(self):
+        """Draw traffic lights near the stop lines."""
+        cx, cy = CENTER_X, CENTER_Y
+        rw     = ROAD_WIDTH
+        r      = 10   # light radius
+        pad    = 18
+
+        positions = {
+            # North: light sits above the stop line (car approaching from top)
+            "North": (cx - rw // 2 - pad, STOP_LINE["North"] - pad),
+            # South: light sits below the stop line (car approaching from bottom)
+            "South": (cx + rw // 2 + pad, STOP_LINE["South"] + pad),
+            # East: light sits to the right of the stop line (car approaching from right)
+            "East":  (STOP_LINE["East"] + pad, cy - rw // 2 - pad),
+            # West: light sits to the left of the stop line (car approaching from left)
+            "West":  (STOP_LINE["West"] - pad, cy + rw // 2 + pad),
+        }
+
+        for d, (lx, ly) in positions.items():
+            color = self.controller.get_signal_color(d)
+            # Housing
+            pygame.draw.rect(self.screen, COLOR_BLACK,
+                             (lx - r - 4, ly - r - 4, (r + 4) * 2, (r + 4) * 2), 0, 4)
+            # Light
+            pygame.draw.circle(self.screen, color, (lx, ly), r)
+
+            # Timer overlay
+            timer_txt = self.font_sm.render(f"{int(self.controller.timer)}s", True, COLOR_WHITE)
+            self.screen.blit(timer_txt, (lx - 12, ly + r + 4))
+
+            # Direction label
+            lbl = self.font_sm.render(d[0], True, COLOR_WHITE)
+            self.screen.blit(lbl, (lx - 4, ly - r - 18))
+
+    def _draw_vehicles(self):
+        for v in self.vehicles:
+            if v.direction in ("North", "South"):
+                rect = pygame.Rect(v.x - VEHICLE_WIDTH // 2,
+                                   v.y - VEHICLE_LENGTH // 2,
+                                   VEHICLE_WIDTH, VEHICLE_LENGTH)
+            else:
+                rect = pygame.Rect(v.x - VEHICLE_LENGTH // 2,
+                                   v.y - VEHICLE_WIDTH // 2,
+                                   VEHICLE_LENGTH, VEHICLE_WIDTH)
+            pygame.draw.rect(self.screen, v.color, rect, 0, 3)
+            # Windshield stripe
+            stripe_color = tuple(min(255, c + 60) for c in v.color)
+            if v.direction in ("North", "South"):
+                pygame.draw.rect(self.screen, stripe_color,
+                                 (rect.x + 2, rect.y + 3, rect.w - 4, 4), 0, 2)
+            else:
+                pygame.draw.rect(self.screen, stripe_color,
+                                 (rect.x + 3, rect.y + 2, 4, rect.h - 4), 0, 2)
+
+    def _draw_hud(self, video_mode: bool):
+        """Side-panel with metrics."""
+        panel_w  = 220
+        panel_x  = WINDOW_WIDTH - panel_w
+        pygame.draw.rect(self.screen, COLOR_PANEL_BG,
+                         (panel_x, 0, panel_w, WINDOW_HEIGHT))
+        pygame.draw.line(self.screen, COLOR_ACCENT,
+                         (panel_x, 0), (panel_x, WINDOW_HEIGHT), 2)
+
+        y  = 14
+        dy = 22
+
+        def txt(s, color=COLOR_WHITE, big=False):
+            nonlocal y
+            f = self.font_md if big else self.font_sm
+            surf = f.render(s, True, color)
+            self.screen.blit(surf, (panel_x + 10, y))
+            y += dy
+
+        txt("AI TRAFFIC SYSTEM", COLOR_ACCENT, big=True)
+        txt(f"Mode: {'VIDEO' if video_mode else 'SIM'}", COLOR_ACCENT)
+        txt("")
+
+        txt("─── SIGNALS ───", COLOR_ACCENT)
+        for d in DIRECTIONS:
+            col = self.controller.get_signal_color(d)
+            txt(f"  {d:<6}: {self.controller.signals[d]}", col)
+        txt(f"  Timer : {self.controller.timer:.1f}s", COLOR_WHITE)
+        txt(f"  Served: {self.controller.green_elapsed:.1f}s", COLOR_WHITE)
+        txt(f"  Cycle : {self.controller.cycle_count}", COLOR_WHITE)
+
+        # Show early-cutoff indicator when active
+        from traffic_controller import PHASE_NS_GREEN, PHASE_EW_GREEN, EARLY_CUTOFF_THRESHOLD, WAITING_MIN_DENSITY, MIN_GREEN_ELAPSED
+        if self.controller.phase in (PHASE_NS_GREEN, PHASE_EW_GREEN):
+            ap = ["North", "South"] if self.controller.phase == PHASE_NS_GREEN else ["East", "West"]
+            wp = ["East", "West"]   if self.controller.phase == PHASE_NS_GREEN else ["North", "South"]
+            ad = sum(self.densities.get(d, 0) for d in ap)
+            wd = sum(self.densities.get(d, 0) for d in wp)
+            cutoff_ready = (self.controller.green_elapsed >= MIN_GREEN_ELAPSED and
+                            ad <= EARLY_CUTOFF_THRESHOLD and wd >= WAITING_MIN_DENSITY)
+            status_col = (255, 80, 80) if cutoff_ready else (80, 200, 80)
+            status_txt = "CUTTING SHORT!" if cutoff_ready else "active"
+            txt(f"  Phase : {status_txt}", status_col)
+        txt("")
+
+        txt("─── DENSITY ───", COLOR_ACCENT)
+        bar_max = 80
+        for d in DIRECTIONS:
+            density = self.densities.get(d, 0)
+            txt(f"  {d:<6}: {density:>2}", COLOR_WHITE)
+            bar_w = int(density / 10 * bar_max)
+            pygame.draw.rect(self.screen, (60, 60, 60),
+                             (panel_x + 10, y - 4, bar_max, 8), 0, 3)
+            if bar_w > 0:
+                pygame.draw.rect(self.screen, COLOR_ACCENT,
+                                 (panel_x + 10, y - 4, bar_w, 8), 0, 3)
+            y += 6
+
+        txt("")
+        txt("─── METRICS ───", COLOR_ACCENT)
+        for d in DIRECTIONS:
+            txt(f"  {d:<6} wait: {self._avg_wait[d]:.1f}s", COLOR_WHITE)
+        txt("")
+
+        agt = self.controller.agent
+        txt("─── AI AGENT ───", COLOR_ACCENT)
+        txt(f"  ε    : {agt.epsilon:.3f}", COLOR_WHITE)
+        txt(f"  Avg R: {agt.average_reward:.2f}", COLOR_WHITE)
+        txt(f"  Steps: {agt.step_count}", COLOR_WHITE)
+        txt("")
+        txt("[ESC] Quit", (160, 160, 160))
+
+    # ------------------------------------------------------------------
+    # Accessors for metrics
+    # ------------------------------------------------------------------
+
+    @property
+    def avg_wait_times(self) -> dict:
+        return dict(self._avg_wait)
+
+    @property
+    def queue_lengths(self) -> dict:
+        return {d: sum(1 for v in self.vehicles
+                       if v.direction == d and v.stopped)
+                for d in DIRECTIONS}
+
+    @property
+    def total_cleared(self) -> dict:
+        return dict(self._total_cleared)

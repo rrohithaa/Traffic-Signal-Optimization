@@ -1,0 +1,59 @@
+# =============================================================================
+# traffic_generator.py – Simulated traffic-density generator
+# =============================================================================
+# When no video feed is available this module produces realistic-looking
+# random vehicle-count values for each lane so the rest of the system can
+# operate in pure-simulation mode.
+# =============================================================================
+
+import random
+import math
+from config import DIRECTIONS, MAX_DENSITY
+
+
+class TrafficGenerator:
+    """
+    Generates synthetic vehicle-density values for all four lanes.
+
+    Density values are integers in [0, MAX_DENSITY].
+    A slow sinusoidal drift simulates rush-hour peaks so the AI agent
+    experiences varying load conditions during training / demo.
+    """
+
+    def __init__(self):
+        self._frame   = 0          # internal tick counter
+        self._base    = {d: random.randint(2, 6) for d in DIRECTIONS}
+        self._phase   = {d: random.uniform(0, 2 * math.pi) for d in DIRECTIONS}
+        self._period  = 600        # frames for one full oscillation (~10 s at 60 fps)
+
+    # ------------------------------------------------------------------
+    def update(self) -> dict:
+        """
+        Advance one simulation tick and return a density dict.
+
+        Returns
+        -------
+        dict  {direction: int}  vehicle counts for North/South/East/West
+        """
+        self._frame += 1
+        densities = {}
+
+        for d in DIRECTIONS:
+            # Sinusoidal base + small random jitter
+            wave  = math.sin(2 * math.pi * self._frame / self._period + self._phase[d])
+            value = self._base[d] + wave * 3 + random.randint(-1, 1)
+            densities[d] = max(0, min(MAX_DENSITY, int(round(value))))
+
+        return densities
+
+    # ------------------------------------------------------------------
+    def spike(self, direction: str, amount: int = 4):
+        """Temporarily raise traffic on one lane (for demo purposes)."""
+        if direction in self._base:
+            self._base[direction] = min(MAX_DENSITY, self._base[direction] + amount)
+
+    # ------------------------------------------------------------------
+    def reset(self):
+        """Reset internal state."""
+        self._frame = 0
+        self._base  = {d: random.randint(2, 6) for d in DIRECTIONS}

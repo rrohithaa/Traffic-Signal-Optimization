@@ -1,0 +1,201 @@
+# =============================================================================
+# traffic_controller.py – Traffic-light state machine (adaptive version)
+# =============================================================================
+# Phase cycle:
+#   Phase 0 : NS GREEN   / EW RED
+#   Phase 1 : NS YELLOW  / EW RED
+#   Phase 2 : EW GREEN   / NS RED
+#   Phase 3 : EW YELLOW  / NS RED
+#
+# Adaptive behaviour:
+#   • The Q-Learning agent sets the MAXIMUM green time for each phase.
+#   • Every frame, if the active lane density drops to EARLY_CUTOFF_THRESHOLD
+#     AND the waiting lane has at least WAITING_MIN_DENSITY vehicles AND
+#     at least MIN_GREEN_ELAPSED seconds have already been served,
+#     the green is cut short and the yellow phase begins immediately.
+#   • This means an empty lane never holds up a busy one.
+# =============================================================================
+
+import time
+from config import (
+    DIRECTIONS, NS_PAIR, EW_PAIR,
+    YELLOW_TIME, DEFAULT_GREEN, MIN_GREEN_TIME, MAX_GREEN_TIME,
+    COLOR_RED, COLOR_GREEN, COLOR_YELLOW
+)
+from ai_optimizer import QLearningAgent
+
+# Signal-light state constants
+RED    = "RED"
+GREEN  = "GREEN"
+YELLOW = "YELLOW"
+
+# Phase identifiers
+PHASE_NS_GREEN  = 0
+PHASE_NS_YELLOW = 1
+PHASE_EW_GREEN  = 2
+PHASE_EW_YELLOW = 3
+
+# ── Adaptive cutoff tuning ────────────────────────────────────────────────────
+# If the active pair's total density falls to or below this value...
+EARLY_CUTOFF_THRESHOLD = 1
+
+# ...AND the waiting pair has at least this many vehicles...
+WAITING_MIN_DENSITY = 2
+
+# ...AND at least this many seconds of green have already elapsed:
+MIN_GREEN_ELAPSED = 3.0      # never cut before 3 s (avoids rapid flicker)
+
+
+class TrafficController:
+    """
+    Manages traffic light phases and integrates the Q-Learning agent.
+
+    Attributes
+    ----------
+    signals       : dict  {direction: str}  current signal for each lane
+    phase         : int   current phase index
+    timer         : float seconds remaining in current phase
+    cycle_count   : int   number of completed full cycles
+    green_elapsed : float seconds of green already served this phase
+    """
+
+    def __init__(self, agent: QLearningAgent):
+        self.agent         = agent
+        self.phase         = PHASE_NS_GREEN
+        self.timer         = float(DEFAULT_GREEN)
+        self.cycle_count   = 0
+        self.signals       = {d: RED for d in DIRECTIONS}
+        self.green_elapsed = 0.0
+        self._apply_phase()
+
+        self._phase_start_time = time.time()
+        self._waiting_snapshot = {d: 0 for d in DIRECTIONS}
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def update(self, dt: float, densities: dict, vehicles_cleared: dict):
+        """
+        Advance the controller by dt seconds.
+
+        Parameters
+        ----------
+        dt               : elapsed time this frame (seconds)
+        densities        : {direction: int}  current vehicle counts
+        vehicles_cleared : {direction: int}  vehicles that left this frame
+        """
+        self.timer -= dt
+
+        # Accumulate green time served in current green phase
+        if self.phase in (PHASE_NS_GREEN, PHASE_EW_GREEN):
+            self.green_elapsed += dt
+
+        if self.timer <= 0.0:
+            self._advance_phase(densities, vehicles_cleared)
+        else:
+            # Mid-phase: check whether to cut green early
+            if self.phase in (PHASE_NS_GREEN, PHASE_EW_GREEN):
+                self._check_early_cutoff(densities, vehicles_cleared)
+
+    def get_signal_color(self, direction: str) -> tuple:
+        """Return the RGB colour for the given direction's signal."""
+        state = self.signals[direction]
+        return {RED: COLOR_RED, GREEN: COLOR_GREEN, YELLOW: COLOR_YELLOW}[state]
+
+    def is_green(self, direction: str) -> bool:
+        return self.signals[direction] == GREEN
+
+    def is_yellow(self, direction: str) -> bool:
+        return self.signals[direction] == YELLOW
+
+    @property
+    def active_pair(self) -> list:
+        if self.phase in (PHASE_NS_GREEN, PHASE_NS_YELLOW):
+            return NS_PAIR
+        return EW_PAIR
+
+    @property
+    def waiting_pair(self) -> list:
+        if self.phase in (PHASE_NS_GREEN, PHASE_NS_YELLOW):
+            return EW_PAIR
+        return NS_PAIR
+
+    # ------------------------------------------------------------------
+    # Adaptive early-cutoff
+    # ------------------------------------------------------------------
+
+    def _check_early_cutoff(self, densities: dict, vehicles_cleared: dict):
+        """
+        Trigger an early phase switch when:
+          1. Enough green time has already been served (>= MIN_GREEN_ELAPSED).
+          2. The active lane is essentially empty (<= EARLY_CUTOFF_THRESHOLD).
+          3. The waiting lane has cars queued (>= WAITING_MIN_DENSITY).
+        Setting timer=0 causes _advance_phase to fire on the next update().
+        """
+        if self.green_elapsed < MIN_GREEN_ELAPSED:
+            return
+
+        active_pair  = NS_PAIR if self.phase == PHASE_NS_GREEN else EW_PAIR
+        waiting_pair = EW_PAIR if self.phase == PHASE_NS_GREEN else NS_PAIR
+
+        active_density  = sum(densities.get(d, 0) for d in active_pair)
+        waiting_density = sum(densities.get(d, 0) for d in waiting_pair)
+
+        if (active_density <= EARLY_CUTOFF_THRESHOLD and
+                waiting_density >= WAITING_MIN_DENSITY):
+            self.timer = 0.0   # will trigger _advance_phase next frame
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _advance_phase(self, densities: dict, vehicles_cleared: dict):
+        """Move to the next phase and ask the AI for the next green time."""
+        self.phase = (self.phase + 1) % 4
+
+        if self.phase == PHASE_NS_GREEN:
+            self.cycle_count += 1
+
+        if self.phase in (PHASE_NS_GREEN, PHASE_EW_GREEN):
+            reward = self._compute_reward(vehicles_cleared)
+
+            upcoming = NS_PAIR if self.phase == PHASE_NS_GREEN else EW_PAIR
+            opposing = EW_PAIR if self.phase == PHASE_NS_GREEN else NS_PAIR
+
+            primary_density   = sum(densities.get(d, 0) for d in upcoming)
+            secondary_density = sum(densities.get(d, 0) for d in opposing)
+
+            self.agent.learn(reward, primary_density, secondary_density)
+
+            # Agent picks the MAXIMUM green for this phase
+            green_time = self.agent.get_green_time(primary_density, secondary_density)
+            self.timer         = float(max(MIN_GREEN_TIME,
+                                           min(MAX_GREEN_TIME, green_time)))
+            self.green_elapsed = 0.0
+        else:
+            self.timer         = float(YELLOW_TIME)
+            self.green_elapsed = 0.0
+
+        self._apply_phase()
+        self._phase_start_time = time.time()
+
+    def _apply_phase(self):
+        """Update the signals dict to reflect the current phase."""
+        if self.phase == PHASE_NS_GREEN:
+            for d in NS_PAIR: self.signals[d] = GREEN
+            for d in EW_PAIR: self.signals[d] = RED
+        elif self.phase == PHASE_NS_YELLOW:
+            for d in NS_PAIR: self.signals[d] = YELLOW
+            for d in EW_PAIR: self.signals[d] = RED
+        elif self.phase == PHASE_EW_GREEN:
+            for d in EW_PAIR: self.signals[d] = GREEN
+            for d in NS_PAIR: self.signals[d] = RED
+        elif self.phase == PHASE_EW_YELLOW:
+            for d in EW_PAIR: self.signals[d] = YELLOW
+            for d in NS_PAIR: self.signals[d] = RED
+
+    def _compute_reward(self, vehicles_cleared: dict) -> float:
+        total_cleared = sum(vehicles_cleared.values())
+        reward = total_cleared * 0.5 - 1.0
+        return reward
