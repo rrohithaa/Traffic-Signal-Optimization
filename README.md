@@ -1,10 +1,17 @@
-timestamp,cycle,density_N,density_S,density_E,density_W,queue_N,queue_S,queue_E,queue_W,wait_N,wait_S,wait_E,wait_W,cleared_total,epsilon,avg_reward
-12:54:32,0,7,8,4,3,0,0,0,0,0.00,0.00,0.00,0.00,0,1.0000,0.0000
-12:54:34,0,6,10,1,2,0,0,4,4,0.00,0.00,0.00,0.00,0,1.0000,0.0000
-12:54:36,0,1,6,2,1,0,0,8,9,0.00,0.00,0.00,0.00,0,1.0000,0.0000
-12:54:38,0,4,3,6,4,0,0,12,12,0.00,0.00,0.00,0.00,7,1.0000,0.0000
-12:54:40,0,5,3,6,7,0,0,12,12,0.00,0.00,0.00,0.00,18,1.0000,0.0000
-12:54:42,0,7,6,3,4,11,9,12,12,0.00,0.00,0.00,0.00,18,1.0000,0.0000
-12:54:44,0,7,9,2,1,12,12,0,0,0.00,0.00,0.00,0.00,18,1.0000,0.0000
-12:54:46,0,2,7,2,2,12,12,0,0,0.00,0.00,0.00,0.00,18,1.0000,0.0000
-12:54:48,0,4,5,6,4,12,12,0,0,0.00,0.00,9.38,9.42,30,1.0000,0.0000
+# Traffic Signal Optimization 🚦
+
+## Description
+This project uses Machine Learning and Computer Vision to optimize traffic signal timings based on vehicle density.
+
+## Features
+- Vehicle detection using YOLO
+- Dynamic signal control
+- Reduces traffic congestion
+
+## Technologies
+- Python
+- OpenCV
+- NumPy
+
+## Author
+Rohithaa
