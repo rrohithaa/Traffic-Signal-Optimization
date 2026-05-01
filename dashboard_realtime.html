@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NEXUS — Real-Time AI Traffic Control</title>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=DM+Mono:wght@300;400;500&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #04060f; --surface: #080d1e; --panel: #0c1128;
+    --border: #1a2550; --accent: #00e5ff; --accent2: #7c3aed;
+    --green: #10b981; --red: #ef4444; --yellow: #f59e0b;
+    --text: #e2e8f0; --muted: #4a6080; --white: #ffffff;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'DM Mono', monospace; min-height: 100vh; overflow-x: hidden; }
+  body::before {
+    content: ''; position: fixed; inset: 0;
+    background-image: linear-gradient(rgba(0,229,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(0,229,255,0.025) 1px, transparent 1px);
+    background-size: 40px 40px; pointer-events: none; z-index: 0;
+  }
+  .container { position: relative; z-index: 1; max-width: 1440px; margin: 0 auto; padding: 0 20px 40px; }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 0 18px; border-bottom: 1px solid var(--border); margin-bottom: 22px;
+  }
+  .logo { display: flex; align-items: center; gap: 14px; }
+  .logo-icon {
+    width: 42px; height: 42px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent2));
+    display: flex; align-items: center; justify-content: center; font-size: 20px;
+    animation: logoPulse 3s ease-in-out infinite;
+  }
+  @keyframes logoPulse { 0%,100% { box-shadow: 0 0 15px rgba(0,229,255,0.3); } 50% { box-shadow: 0 0 35px rgba(0,229,255,0.6); } }
+  .logo h1 { font-family: 'Orbitron', monospace; font-size: 20px; font-weight: 900; letter-spacing: 4px; background: linear-gradient(90deg, var(--accent), #a78bfa); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+  .logo p { font-size: 10px; color: var(--muted); letter-spacing: 3px; margin-top: 2px; }
+  .header-right { display: flex; align-items: center; gap: 20px; }
+  .source-badge {
+    padding: 6px 14px; border-radius: 20px; font-size: 11px; font-family: 'Orbitron', monospace; letter-spacing: 1px;
+    border: 1px solid rgba(0,229,255,0.3); color: var(--accent); background: rgba(0,229,255,0.08);
+  }
+  .live-dot { display: inline-block; width: 7px; height: 7px; background: var(--green); border-radius: 50%; margin-right: 6px; animation: blink 1.2s infinite; }
+  @keyframes blink { 0%,100% { opacity:1; box-shadow: 0 0 6px var(--green); } 50% { opacity:0.3; } }
+  .clock { font-family: 'Orbitron', monospace; font-size: 13px; color: var(--accent); letter-spacing: 2px; }
+
+  /* STATUS BANNER */
+  .status-banner {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 24px; margin-bottom: 20px; display: flex; align-items: center; gap: 20px;
+  }
+  .status-item { display: flex; flex-direction: column; gap: 3px; }
+  .status-label { font-size: 9px; color: var(--muted); letter-spacing: 2px; text-transform: uppercase; }
+  .status-val { font-family: 'Orbitron', monospace; font-size: 16px; font-weight: 700; }
+  .sep { width: 1px; height: 36px; background: var(--border); }
+
+  /* MAIN GRID */
+  .main-grid { display: grid; grid-template-columns: 1fr 1fr 360px; gap: 18px; margin-bottom: 18px; }
+
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+  .ph { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .pt { font-family: 'Syne', sans-serif; font-size: 12px; font-weight: 600; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
+  .ptag { font-size: 9px; padding: 3px 10px; border-radius: 20px; background: rgba(0,229,255,0.08); color: var(--accent); border: 1px solid rgba(0,229,255,0.2); letter-spacing: 1px; }
+
+  /* INTERSECTION VISUAL */
+  .intersection-view { padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .int-canvas-wrap { position: relative; }
+  canvas#intCanvas { border-radius: 10px; }
+
+  /* QUEUE BARS */
+  .queue-panel { padding: 18px; }
+  .queue-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+  .queue-dir { font-family: 'Orbitron', monospace; font-size: 12px; font-weight: 700; width: 20px; }
+  .queue-track { flex: 1; height: 22px; background: rgba(255,255,255,0.04); border-radius: 4px; overflow: hidden; position: relative; }
+  .queue-fill { height: 100%; border-radius: 4px; transition: width 0.8s ease; display: flex; align-items: center; padding-left: 8px; }
+  .queue-fill span { font-size: 10px; font-weight: 700; color: var(--bg); }
+  .queue-count { font-family: 'Orbitron', monospace; font-size: 13px; width: 36px; text-align: right; }
+
+  /* SIGNAL DISPLAY */
+  .signal-display { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+  .signal-phase-name { font-family: 'Orbitron', monospace; font-size: 13px; letter-spacing: 2px; color: var(--accent); text-align: center; }
+  .signal-lights { display: flex; justify-content: center; gap: 16px; }
+  .signal-pole { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .signal-pole-label { font-size: 10px; color: var(--muted); letter-spacing: 1px; }
+  .traffic-light { display: flex; flex-direction: column; gap: 6px; background: #0a0f1e; border: 2px solid #1a2550; border-radius: 10px; padding: 8px; }
+  .light-bulb { width: 28px; height: 28px; border-radius: 50%; opacity: 0.15; transition: all 0.5s; }
+  .light-bulb.r { background: var(--red); }
+  .light-bulb.y { background: var(--yellow); }
+  .light-bulb.g { background: var(--green); }
+  .light-bulb.on { opacity: 1; box-shadow: 0 0 16px currentColor; }
+
+  .timer-bar { background: rgba(255,255,255,0.04); border-radius: 4px; height: 8px; overflow: hidden; }
+  .timer-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width 1s linear; }
+
+  /* DECISION STREAM */
+  .stream-panel { padding: 14px; }
+  .stream-item { display: flex; align-items: flex-start; gap: 8px; padding: 8px 10px; border-radius: 8px; margin-bottom: 6px; background: rgba(255,255,255,0.02); border: 1px solid rgba(255,255,255,0.04); animation: fadeIn 0.4s ease; }
+  @keyframes fadeIn { from { opacity:0; transform: translateY(-6px); } to { opacity:1; transform: none; } }
+  .stream-dot { width: 6px; height: 6px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+  .stream-text { flex: 1; }
+  .stream-ts { font-size: 9px; color: var(--muted); }
+  .stream-msg { font-size: 10px; color: var(--text); margin-top: 2px; }
+  .stream-conf { font-size: 9px; color: var(--accent); margin-top: 2px; }
+
+  /* BOTTOM ROW */
+  .bottom-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; }
+  .chart-pad { padding: 18px; }
+
+  /* VIDEO SOURCE INFO */
+  .source-info {
+    background: rgba(0,229,255,0.05); border: 1px solid rgba(0,229,255,0.15);
+    border-radius: 10px; padding: 14px 18px; margin-bottom: 18px;
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  }
+  .source-left { flex: 1; }
+  .source-title { font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700; color: var(--accent); margin-bottom: 6px; }
+  .source-desc { font-size: 10px; color: var(--muted); line-height: 1.7; }
+  .source-cmd { font-family: 'DM Mono', monospace; font-size: 10px; background: rgba(0,0,0,0.4); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--green); white-space: pre; }
+
+  /* MODE indicator */
+  .mode-mock { color: var(--yellow); border-color: rgba(245,158,11,0.3); background: rgba(245,158,11,0.08); }
+
+  .no-data { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 120px; color: var(--muted); font-size: 11px; gap: 8px; }
+  .no-data .nd-icon { font-size: 24px; }
+</style>
+</head>
+<body>
+<div class="container">
+
+  <!-- HEADER -->
+  <header>
+    <div class="logo">
+      <div class="logo-icon">⬡</div>
+      <div>
+        <h1>NEXUS</h1>
+        <p>Real-Time AI Traffic Signal Optimization</p>
+      </div>
+    </div>
+    <div class="header-right">
+      <div class="source-badge mode-mock" id="sourceBadge"><span class="live-dot"></span>DEMO MODE</div>
+      <div class="clock" id="clock">00:00:00</div>
+    </div>
+  </header>
+
+  <!-- SOURCE INFO BANNER -->
+  <div class="source-info">
+    <div class="source-left">
+      <div class="source-title">📡 How This Dashboard Gets Real Data</div>
+      <div class="source-desc">
+        This dashboard reads <code>realtime_log.json</code> which is written every step by <code>run_realtime.py</code>.
+        Run the Python script in a terminal — the dashboard auto-refreshes every second with live AI decisions.
+        <br>Use a traffic video file for real YOLOv8 vehicle detection, or <code>--mock</code> for realistic simulated patterns.
+      </div>
+    </div>
+    <div class="source-cmd">python run_realtime.py --mock --train-first
+python run_realtime.py --source traffic.mp4
+python run_realtime.py --source 0  (webcam)</div>
+  </div>
+
+  <!-- STATUS BANNER -->
+  <div class="status-banner">
+    <div class="status-item">
+      <span class="status-label">Current Step</span>
+      <span class="status-val" id="stepVal" style="color:var(--accent)">—</span>
+    </div>
+    <div class="sep"></div>
+    <div class="status-item">
+      <span class="status-label">Active Phase</span>
+      <span class="status-val" id="phaseVal" style="color:var(--green)">—</span>
+    </div>
+    <div class="sep"></div>
+    <div class="status-item">
+      <span class="status-label">Total Waiting</span>
+      <span class="status-val" id="waitingVal" style="color:var(--yellow)">—</span>
+    </div>
+    <div class="sep"></div>
+    <div class="status-item">
+      <span class="status-label">Last Reward</span>
+      <span class="status-val" id="rewardVal" style="color:var(--accent2)">—</span>
+    </div>
+    <div class="sep"></div>
+    <div class="status-item">
+      <span class="status-label">Data Source</span>
+      <span class="status-val" id="dataSourceVal" style="color:var(--muted); font-size:11px">Waiting...</span>
+    </div>
+    <div class="sep"></div>
+    <div class="status-item">
+      <span class="status-label">Last Update</span>
+      <span class="status-val" id="lastUpdate" style="color:var(--muted); font-size:11px">—</span>
+    </div>
+  </div>
+
+  <!-- MAIN GRID -->
+  <div class="main-grid">
+
+    <!-- Intersection Visual -->
+    <div class="panel">
+      <div class="ph"><span class="pt">Intersection View</span><span class="ptag">REAL-TIME</span></div>
+      <div class="intersection-view">
+        <canvas id="intCanvas" width="300" height="300"></canvas>
+        <div class="signal-phase-name" id="phaseName">Waiting for data...</div>
+        <div class="timer-bar" style="width:100%">
+          <div class="timer-fill" id="timerFill" style="width:0%"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Queue Bars -->
+    <div class="panel">
+      <div class="ph"><span class="pt">Lane Queue Lengths</span><span class="ptag">VEHICLES</span></div>
+      <div class="queue-panel" id="queuePanel">
+        <div class="no-data"><div class="nd-icon">📡</div>Waiting for realtime_log.json...</div>
+      </div>
+    </div>
+
+    <!-- Signal + Stream -->
+    <div class="panel">
+      <div class="ph"><span class="pt">Signal State</span><span class="ptag">AI CONTROL</span></div>
+      <div class="signal-display">
+        <div class="signal-lights">
+          <div class="signal-pole">
+            <div class="traffic-light" id="tlNS">
+              <div class="light-bulb r" id="lNSr"></div>
+              <div class="light-bulb y" id="lNSy"></div>
+              <div class="light-bulb g" id="lNSg"></div>
+            </div>
+            <div class="signal-pole-label">N–S</div>
+          </div>
+          <div class="signal-pole">
+            <div class="traffic-light" id="tlEW">
+              <div class="light-bulb r" id="lEWr"></div>
+              <div class="light-bulb y" id="lEWy"></div>
+              <div class="light-bulb g" id="lEWg"></div>
+            </div>
+            <div class="signal-pole-label">E–W</div>
+          </div>
+        </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;">
+          <div style="font-size:10px;color:var(--muted);letter-spacing:2px;margin-bottom:8px">AI DECISION LOG</div>
+          <div id="streamItems" style="max-height:200px;overflow:hidden"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- BOTTOM ROW -->
+  <div class="bottom-grid">
+
+    <!-- Wait time chart -->
+    <div class="panel">
+      <div class="ph"><span class="pt">Total Wait Over Time</span><span class="ptag">REAL DATA</span></div>
+      <div class="chart-pad">
+        <canvas id="waitChart" width="380" height="150"></canvas>
+      </div>
+    </div>
+
+    <!-- Per-lane history -->
+    <div class="panel">
+      <div class="ph"><span class="pt">Per-Lane History</span><span class="ptag">LAST 60 STEPS</span></div>
+      <div class="chart-pad">
+        <canvas id="laneChart" width="380" height="150"></canvas>
+      </div>
+    </div>
+
+    <!-- Phase distribution -->
+    <div class="panel">
+      <div class="ph"><span class="pt">Phase Distribution</span><span class="ptag">AI CHOICES</span></div>
+      <div class="chart-pad">
+        <canvas id="phaseChart" width="380" height="150"></canvas>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// ═══════════════════════════════════════════════════════
+//  CLOCK
+// ═══════════════════════════════════════════════════════
+setInterval(() => {
+  document.getElementById('clock').textContent = new Date().toTimeString().slice(0,8);
+}, 1000);
+
+// ═══════════════════════════════════════════════════════
+//  STATE
+// ═══════════════════════════════════════════════════════
+let history = [];         // Full log loaded from file
+let displayHistory = [];  // What we've shown so far (for animation)
+let phaseCount = [0,0,0,0];
+let lastStep = -1;
+
+const PHASES = ["N-S Green","E-W Green","N-S Left","E-W Left"];
+const PHASE_COLORS = ["#10b981","#00e5ff","#a78bfa","#f59e0b"];
+
+// ═══════════════════════════════════════════════════════
+//  RANDOM DATA GENERATOR (Demo Mode)
+// ═══════════════════════════════════════════════════════
+let mockStep = 0;
+let mockQueues = { N: 8, S: 5, E: 12, W: 3 };
+let mockPhase = 0;
+let phaseTick = 0;
+
+function randInt(min, max) { return Math.floor(Math.random() * (max - min + 1)) + min; }
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+function generateMockStep() {
+  mockStep++;
+  phaseTick++;
+
+  // Rotate phases every 8–14 ticks
+  if (phaseTick >= randInt(8, 14)) {
+    mockPhase = (mockPhase + 1) % 4;
+    phaseTick = 0;
+  }
+
+  // Queues drift randomly, green directions drain faster
+  const drainDir = mockPhase === 0 ? ['N','S'] : mockPhase === 1 ? ['E','W'] : mockPhase === 2 ? ['N'] : ['E'];
+  for (const dir of ['N','S','E','W']) {
+    const arrive = randInt(0, 3);
+    const depart = drainDir.includes(dir) ? randInt(1, 4) : randInt(0, 1);
+    mockQueues[dir] = clamp(mockQueues[dir] + arrive - depart, 0, 28);
+  }
+
+  const total_waiting = mockQueues.N + mockQueues.S + mockQueues.E + mockQueues.W;
+  const reward = parseFloat((-(total_waiting * 0.1) + randInt(-5, 5) * 0.1).toFixed(2));
+  const ts = new Date().toTimeString().slice(0, 8);
+
+  return {
+    step: mockStep,
+    phase: mockPhase,
+    queues: { ...mockQueues },
+    total_waiting,
+    reward,
+    timestamp: ts
+  };
+}
+
+function loadLog() {
+  const latest = generateMockStep();
+
+  // Build history for charts
+  history.push(latest);
+  if (history.length > 120) history.shift();
+
+  updateStatus(latest);
+  updateQueues(latest.queues);
+  updateSignals(latest.phase);
+  updateIntersectionCanvas(latest.queues, latest.phase);
+  updateStream(latest);
+
+  displayHistory = history.slice(-120);
+  drawWaitChart();
+  drawLaneChart();
+  drawPhaseChart();
+
+  document.getElementById('sourceBadge').innerHTML = '<span class="live-dot"></span>DEMO LIVE';
+  document.getElementById('dataSourceVal').textContent = 'Random Simulation';
+  document.getElementById('lastUpdate').textContent = latest.timestamp;
+}
+
+// ═══════════════════════════════════════════════════════
+//  UPDATE FUNCTIONS
+// ═══════════════════════════════════════════════════════
+function updateStatus(d) {
+  document.getElementById('stepVal').textContent = d.step;
+  document.getElementById('phaseVal').textContent = PHASES[d.phase] || d.phase_name || '—';
+  document.getElementById('waitingVal').textContent = d.total_waiting;
+  document.getElementById('rewardVal').textContent = d.reward?.toFixed(2) || '—';
+  document.getElementById('phaseName').textContent = PHASES[d.phase] || '—';
+  phaseCount[d.phase] = (phaseCount[d.phase] || 0) + 1;
+
+  // Timer fill (simulate 0-60s based on phase)
+  const timerPct = Math.min(100, ((d.step % 30) / 30) * 100);
+  document.getElementById('timerFill').style.width = timerPct + '%';
+}
+
+function updateQueues(queues) {
+  if (!queues) return;
+  const panel = document.getElementById('queuePanel');
+  const maxQ = Math.max(...Object.values(queues), 1);
+  const colors = { N:'#10b981', S:'#00e5ff', E:'#7c3aed', W:'#f59e0b' };
+
+  panel.innerHTML = Object.entries(queues).map(([dir, count]) => {
+    const pct = Math.min(100, (count / 30) * 100);
+    const color = colors[dir];
+    return `
+      <div class="queue-row">
+        <div class="queue-dir" style="color:${color}">${dir}</div>
+        <div class="queue-track">
+          <div class="queue-fill" style="width:${pct}%;background:${color}">
+            <span>${count}</span>
+          </div>
+        </div>
+        <div class="queue-count" style="color:${color}">${count}</div>
+      </div>`;
+  }).join('');
+}
+
+function updateSignals(phase) {
+  // Reset all
+  ['lNSr','lNSy','lNSg','lEWr','lEWy','lEWg'].forEach(id => {
+    document.getElementById(id)?.classList.remove('on');
+  });
+
+  if (phase === 0) { // N-S Green
+    document.getElementById('lNSg')?.classList.add('on');
+    document.getElementById('lEWr')?.classList.add('on');
+  } else if (phase === 1) { // E-W Green
+    document.getElementById('lNSr')?.classList.add('on');
+    document.getElementById('lEWg')?.classList.add('on');
+  } else if (phase === 2) { // N-S Left
+    document.getElementById('lNSy')?.classList.add('on');
+    document.getElementById('lEWr')?.classList.add('on');
+  } else if (phase === 3) { // E-W Left
+    document.getElementById('lNSr')?.classList.add('on');
+    document.getElementById('lEWy')?.classList.add('on');
+  }
+}
+
+// Stream log
+let streamLog = [];
+function updateStream(d) {
+  const msgs = [
+    `Phase ${PHASES[d.phase]} activated`,
+    `Queues: N=${d.queues?.N} S=${d.queues?.S} E=${d.queues?.E} W=${d.queues?.W}`,
+    `Reward: ${d.reward?.toFixed(2)} | Wait: ${d.total_waiting}`,
+  ];
+  const colors = ['#10b981','#00e5ff','#a78bfa'];
+  streamLog.unshift({ msgs, colors, ts: d.timestamp || '--:--:--', phase: d.phase });
+  if (streamLog.length > 5) streamLog.pop();
+
+  document.getElementById('streamItems').innerHTML = streamLog.map((s,i) => `
+    <div class="stream-item">
+      <div class="stream-dot" style="background:${PHASE_COLORS[s.phase]}"></div>
+      <div class="stream-text">
+        <div class="stream-ts">${s.ts}</div>
+        <div class="stream-msg">${s.msgs[0]}</div>
+        <div class="stream-conf">${s.msgs[1]}</div>
+      </div>
+    </div>
+  `).join('');
+}
+
+// ═══════════════════════════════════════════════════════
+//  INTERSECTION CANVAS
+// ═══════════════════════════════════════════════════════
+function updateIntersectionCanvas(queues, phase) {
+  const canvas = document.getElementById('intCanvas');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2;
+
+  ctx.clearRect(0,0,W,H);
+
+  // Background
+  ctx.fillStyle = '#080d1e';
+  ctx.fillRect(0,0,W,H);
+
+  // Roads
+  ctx.fillStyle = '#111827';
+  ctx.fillRect(cx-30, 0, 60, H);  // Vertical road
+  ctx.fillRect(0, cy-30, W, 60);   // Horizontal road
+
+  // Road markings
+  ctx.strokeStyle = '#374151';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([15,10]);
+  ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, cy-35); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy+35); ctx.lineTo(cx, H); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(cx-35, cy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx+35, cy); ctx.lineTo(W, cy); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Intersection box
+  ctx.fillStyle = '#1a2535';
+  ctx.fillRect(cx-30, cy-30, 60, 60);
+
+  // Phase colors
+  const phaseColors = {
+    0: {N:'#10b981', S:'#10b981', E:'#ef4444', W:'#ef4444'},
+    1: {N:'#ef4444', S:'#ef4444', E:'#10b981', W:'#10b981'},
+    2: {N:'#f59e0b', S:'#ef4444', E:'#ef4444', W:'#f59e0b'},
+    3: {N:'#ef4444', S:'#f59e0b', E:'#f59e0b', W:'#ef4444'},
+  };
+  const pc = phaseColors[phase] || phaseColors[0];
+
+  // Draw lane queue indicators
+  function drawLane(dir, x, y, w, h, count, color) {
+    const maxQ = 30;
+    const fillH = Math.min(h, (count/maxQ) * h);
+
+    // Lane background
+    ctx.fillStyle = 'rgba(255,255,255,0.03)';
+    ctx.fillRect(x, y, w, h);
+
+    // Queue fill
+    ctx.fillStyle = color + '33';
+    if (dir === 'N') ctx.fillRect(x, y + h - fillH, w, fillH);
+    else if (dir === 'S') ctx.fillRect(x, y, w, fillH);
+    else if (dir === 'E') ctx.fillRect(x, y, fillH, h);
+    else if (dir === 'W') ctx.fillRect(x + w - fillH, y, fillH, h);
+
+    // Border
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x+1, y+1, w-2, h-2);
+
+    // Label
+    ctx.fillStyle = color;
+    ctx.font = 'bold 11px Orbitron, monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(`${dir}:${count}`, x + w/2, dir==='N'||dir==='S' ? (dir==='N'?y+h-15:y+15) : y+h/2);
+  }
+
+  if (queues) {
+    drawLane('N', cx-28, 5, 56, cy-35, queues.N||0, pc.N);
+    drawLane('S', cx-28, cy+35, 56, H-cy-40, queues.S||0, pc.S);
+    drawLane('W', 5, cy-28, cx-35, 56, queues.W||0, pc.W);
+    drawLane('E', cx+35, cy-28, W-cx-40, 56, queues.E||0, pc.E);
+  }
+
+  // Center signal box
+  ctx.fillStyle = '#0a0f1e';
+  ctx.strokeStyle = '#1a2550';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.roundRect(cx-18, cy-18, 36, 36, 6);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = PHASE_COLORS[phase] || '#00e5ff';
+  ctx.font = 'bold 10px Orbitron, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('AI', cx, cy);
+}
+
+// ═══════════════════════════════════════════════════════
+//  CHARTS
+// ═══════════════════════════════════════════════════════
+function drawLine(ctx, data, x0, y0, w, h, color, min, max) {
+  if (data.length < 2) return;
+  const rng = max - min || 1;
+  ctx.beginPath();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.shadowColor = color;
+  ctx.shadowBlur = 6;
+  data.forEach((v, i) => {
+    const px = x0 + (i / (data.length-1)) * w;
+    const py = y0 + h - ((v - min) / rng) * h;
+    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+  });
+  ctx.stroke();
+  ctx.shadowBlur = 0;
+}
+
+function drawChartBg(ctx, w, h) {
+  ctx.fillStyle = '#080d1e';
+  ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle = 'rgba(26,37,80,0.6)';
+  ctx.lineWidth = 1;
+  for (let i=0; i<=4; i++) {
+    const y = (i/4)*h;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke();
+  }
+}
+
+function drawWaitChart() {
+  const c = document.getElementById('waitChart');
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  drawChartBg(ctx, W, H);
+  if (!displayHistory.length) return;
+  const waits = displayHistory.map(d => d.total_waiting);
+  const mn = Math.min(...waits), mx = Math.max(...waits, 1);
+  drawLine(ctx, waits, 0, 0, W, H, '#00e5ff', mn, mx);
+  ctx.fillStyle = '#4a6080'; ctx.font = '9px DM Mono, monospace';
+  ctx.fillText('Total vehicles waiting', 8, 14);
+}
+
+function drawLaneChart() {
+  const c = document.getElementById('laneChart');
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  drawChartBg(ctx, W, H);
+  if (!displayHistory.length) return;
+  const colors = {N:'#10b981', S:'#00e5ff', E:'#7c3aed', W:'#f59e0b'};
+  const lanes = ['N','S','E','W'];
+  lanes.forEach(lane => {
+    const vals = displayHistory.map(d => d.queues?.[lane] || 0);
+    const mx = Math.max(...vals, 1);
+    drawLine(ctx, vals, 0, 0, W, H, colors[lane], 0, mx);
+  });
+  // Legend
+  let lx = 8;
+  lanes.forEach(lane => {
+    ctx.fillStyle = colors[lane];
+    ctx.fillRect(lx, 6, 16, 4);
+    ctx.fillStyle = '#4a6080'; ctx.font = '9px DM Mono';
+    ctx.fillText(lane, lx+20, 12);
+    lx += 46;
+  });
+}
+
+function drawPhaseChart() {
+  const c = document.getElementById('phaseChart');
+  const ctx = c.getContext('2d');
+  const W = c.width, H = c.height;
+  drawChartBg(ctx, W, H);
+
+  // Get phase counts from history
+  const counts = [0,0,0,0];
+  displayHistory.forEach(d => { if (d.phase >= 0 && d.phase < 4) counts[d.phase]++; });
+  const total = counts.reduce((a,b)=>a+b,0) || 1;
+
+  const barW = (W - 40) / 4 - 8;
+  const maxH = H - 40;
+  const names = ['N-S Grn','E-W Grn','N-S Lft','E-W Lft'];
+
+  counts.forEach((count, i) => {
+    const bx = 20 + i * (barW + 8);
+    const bh = (count / total) * maxH;
+    const by = H - 30 - bh;
+    const color = PHASE_COLORS[i];
+
+    // Bar
+    ctx.fillStyle = color + '33';
+    ctx.fillRect(bx, by, barW, bh);
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx, by, barW, bh);
+
+    // Pct label
+    ctx.fillStyle = color;
+    ctx.font = 'bold 10px DM Mono';
+    ctx.textAlign = 'center';
+    ctx.fillText(Math.round(count/total*100)+'%', bx+barW/2, by-4);
+
+    // Name
+    ctx.fillStyle = '#4a6080'; ctx.font = '8px DM Mono';
+    ctx.fillText(names[i], bx+barW/2, H-12);
+  });
+}
+
+// ═══════════════════════════════════════════════════════
+//  POLL for new data every second
+// ═══════════════════════════════════════════════════════
+loadLog();
+setInterval(loadLog, 1000);
+</script>
+</body>
+</html>
